@@ -255,6 +255,24 @@ Four policies were trained on the same demonstrations for $10^5$ updates. They d
 
 The baseline tops out at 7 of 25, at 80,000 updates, and finishes at 5 of 25. Its action-space loss falls from 0.253 to about $9.7 \times 10^{-3}$, comparable to the $x_0$ diffusion loss, while its success rate stays far below either diffusion policy. The gap is the usual one for multimodal imitation on a contact task. Several approach directions, grasp timings, and insertion alignments are consistent with the demonstrations. Squared error against a single demonstrated action averages across those modes and can produce a command that misses the bore. A diffusion model over a 10-step chunk represents that conditional distribution instead of its mean, and the chunk keeps the eight executed commands temporally consistent with one another.
 
+The clips below are rollouts of the four final checkpoints. The top row is one success from each policy. The bottom row is one failure from each, in the same order. Each clip starts from a different draw of the nut and the pegs.
+
+<p align="center">
+  <img src="figures/success_eps_cosine.gif" alt="Cosine noise policy seats the nut" width="23%">
+  <img src="figures/success_eps_sigmoid.gif" alt="Sigmoid noise policy seats the nut" width="23%">
+  <img src="figures/success_x0_cosine.gif" alt="Clean-action policy seats the nut" width="23%">
+  <img src="figures/success_bc.gif" alt="Behavior cloning seats the nut" width="23%">
+</p>
+<p align="center"><em>Success. Left to right: noise prediction with the cosine schedule, noise prediction with the sigmoid schedule, clean-action prediction, behavior cloning.</em></p>
+
+<p align="center">
+  <img src="figures/failure_eps_cosine.gif" alt="Cosine noise policy misses the peg" width="23%">
+  <img src="figures/failure_eps_sigmoid.gif" alt="Sigmoid noise policy misses the peg" width="23%">
+  <img src="figures/failure_x0_cosine.gif" alt="Clean-action policy misses the peg" width="23%">
+  <img src="figures/failure_bc.gif" alt="Behavior cloning misses the peg" width="23%">
+</p>
+<p align="center"><em>Failure, same four policies. The nut is grasped or approached, and it does not stay on the brass peg.</em></p>
+
 <p align="center">
   <img src="figures/view_side.png" alt="Side view of the arm reaching over the nut and the pegs" width="78%">
 </p>
@@ -283,7 +301,7 @@ The horizon of 50 is the diffusion horizon. Image models often use on the order 
 | `train_all.py` | ε-prediction, x₀-prediction, then behavior cloning |
 | `plot_completion_vs_gradient_steps.py` | Success rate against gradient step |
 | `plot_diffusion_generation.py` | Reverse-process visualization of one denoised chunk |
-| `figures/` | Assembly clip, workspace and camera views, loss, success, `metrics.csv` |
+| `figures/` | Assembly clip, policy success and failure rollouts, workspace views, loss, success, `metrics.csv` |
 
 ## Setup
 
