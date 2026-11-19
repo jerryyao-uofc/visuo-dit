@@ -123,50 +123,97 @@ $$
 
 Call this condition $c \in \mathbb{R}^{256}$. It is the only visual information the transformer receives. Raw pixels and the 1033-dimensional concatenation are not tokens, and they are not appended to the action sequence.
 
-### Diffusion transformer
+### Action chunk as an encoder–decoder sequence
 
-`DiT1d` is a 1-D DiT over the action horizon, not over image patches. The sequence length is 10. The token dimension starts at 7 and is lifted to $d = 320$. Depth is 2 blocks. Attention uses 10 heads, so each head has dimension 32. The design follows the adaptive layer-norm conditioning of Peebles and Xie, reduced to a short sequence because the object being denoised is an action chunk rather than a latent image.
+The chunk is a sequence, and the network that scores it is a conditional sequence model with an encoder and a decoder. The encoder reads the scene once. The decoder reads the noisy action sequence and is modulated by that scene at every layer. The two halves meet only through that modulation. Image pixels are never tokens in the decoder, and the ten actions are never concatenated onto the 256-dimensional scene vector.
 
-There are two paths, and they meet only inside the blocks.
-
-**Sequence path.** A noisy chunk $x_t \in \mathbb{R}^{10 \times 7}$ is projected by a learned linear map $W_x \in \mathbb{R}^{320 \times 7}$ and added to a fixed sinusoidal position embedding of the horizon index $0,\ldots,9$. The position embedding marks which token is the immediate command and which tokens are further into the chunk. It is not an embedding of the diffusion time. After this projection the sequence is $10 \times 320$, and that is what self-attention attends over. Attention is bidirectional across the horizon: every action in the chunk can depend on every other action, which is appropriate because the chunk is generated jointly rather than left to right.
-
-**Condition path.** Diffusion time $t \in \{0,\ldots,49\}$ is embedded by a Fourier feature map. Thirty-two frequencies are drawn once from $\mathcal{N}(0, 16^2)$ and frozen. The scalar $t$ is multiplied by $2\pi$ times those frequencies, and sine and cosine are concatenated to 64 dimensions. A small Mish MLP lifts that to 256, matching $c$. The observation condition is then added to the time embedding,
+Write the clean chunk as an ordered sequence of length $H = 10$,
 
 $$
-e = c + \phi(t) \in \mathbb{R}^{256},
+a_{1:H} = (a_1,\ldots,a_H), \qquad a_h \in \mathbb{R}^{7},
 $$
 
-and a second MLP, Linear–Mish–Linear–Mish, maps $e$ to a 320-dimensional modulation vector. This vector is shared by every token in the chunk. The scene does not change across the ten predicted actions, so it should not be re-encoded as an eleventh token. It should rescale the features of all ten.
+with $a_1$ the command about to be executed and $a_H$ the furthest action in the plan. At diffusion index $t$ the decoder does not see $a_{1:H}$. It sees a noisy copy $x_t \in \mathbb{R}^{H \times 7}$, one token per horizon step. The observation encoder is the map already defined above,
+
+$$
+c = \mathrm{Enc}_\psi(o) \in \mathbb{R}^{256},
+$$
+
+from the two cameras and the nine arm scalars. $\mathrm{Enc}_\psi$ is convolutional and then a mixer. It is the encoder of this sequence model: one scene in, one memory vector out. It is not a stack of transformer blocks over image patches.
+
+The decoder input is a position-tagged lift of the noisy tokens. For each horizon index $h \in \{1,\ldots,H\}$,
+
+$$
+z_h^{(0)} = W_x x_t^{(h)} + p_h \in \mathbb{R}^{d}, \qquad d = 320,
+$$
+
+where $W_x \in \mathbb{R}^{320 \times 7}$ and $p_h$ is a fixed sinusoidal encoding of $h$, not of the diffusion index $t$:
+
+$$
+(p_h)_{2i} = \sin\!\left(h\,/\,10000^{2i/d}\right), \qquad (p_h)_{2i+1} = \cos\!\left(h\,/\,10000^{2i/d}\right).
+$$
+
+Stacking these tokens gives the decoder state $Z^{(0)} \in \mathbb{R}^{H \times d}$. Self-attention then runs over the horizon. Because the chunk is generated as one joint object, that attention is bidirectional: token $h$ may depend on every other token, including those later in the plan.
+
+The encoder memory has to enter the decoder together with the diffusion index. A frozen random-Fourier map $\phi$ sends $t$ to $\mathbb{R}^{256}$, using 32 frequencies drawn once from $\mathcal{N}(0, 16^2)$. The encoder state and the time embedding are added and passed through a Mish MLP,
+
+$$
+m_t = \mathrm{MLP}\!\left(c + \phi(t)\right) \in \mathbb{R}^{d}.
+$$
+
+$m_t$ is the decoder’s conditioning memory. It is a single vector, shared by all $H$ positions, because the cameras do not change inside one chunk. A classical encoder–decoder would keep a sequence of encoder tokens and let the decoder cross-attend to them. Here the encoder has already pooled the scene into one vector, so there is no second attention stream. Each decoder block turns $m_t$ into per-channel scale, shift, and gate vectors and applies them to every action token.
 
 ```mermaid
 flowchart LR
-    subgraph seq [Sequence path]
-        A7["10 steps of 7 numbers<br/>the noisy human plan"] --> A320["10 lists of 320<br/>plus a position tag"]
+    subgraph enc [Encoder]
+        O["Observation o"] --> C["c in R^256"]
     end
-    subgraph cond [Condition path]
-        CAM["256 from the cameras and the arm"] --> PLUS["Add"]
-        T["256 from the diffusion step"] --> PLUS
-        PLUS --> K["320 knobs"]
+    subgraph dec [Decoder over the action chunk]
+        XT["Noisy tokens x_t, H by 7"] --> Z0["Z with position tags, H by 320"]
+        C --> M["Memory m_t"]
+        TT["Diffusion index t"] --> M
+        Z0 --> BLK["Two decoder blocks"]
+        M --> BLK
+        BLK --> EPS["Predicted noise, H by 7"]
     end
-    A320 --> B1["Block 1: scale, shift, 10-head attention, gated feed-forward"]
-    K --> B1
-    B1 --> B2["Block 2: the same layers"]
-    K --> B2
-    B2 --> OUT["10 by 7 predicted noise"]
 ```
 
-**Adaptive layer norm, zero-initialized.** Each block applies adaLN-Zero. LayerNorm inside the block has no learned affine parameters. From the 320-dimensional modulation, a linear layer produces six vectors of size 320: scale, shift, and gate for the attention branch, and the same three for the MLP branch. For a token matrix $X$,
+**Decoder block.** There are $L = 2$ blocks, each of width $d = 320$, with $n = 10$ heads and head dimension $d_h = d / n = 32$. Block $\ell$ consumes $Z^{(\ell-1)}$ and the same memory $m_t$. LayerNorm inside the block has no learned affine parameters. A linear map of $m_t$ produces six vectors in $\mathbb{R}^{d}$: scale, shift, and gate for the attention branch, and the same three for the feed-forward branch. For a scale $s$ and a shift $b$, broadcast across the horizon,
 
 $$
-\mathrm{Modulate}(X; s, b) = X \odot (1 + s) + b,
+\mathrm{Modulate}(Z; s, b) = Z \odot (1 + s) + b.
 $$
 
-broadcast across the horizon. The attention residual is multiplied by its gate before it is added, and the feed-forward residual is gated the same way. The feed-forward width is the usual factor of four: $320 \to 1280 \to 320$, with the tanh approximation of GELU. The final readout is another conditioned LayerNorm and a linear map back to 7.
+Multi-head self-attention is then the usual split of queries, keys, and values along the action sequence. With $Z$ the modulated, normalized state,
 
-The gates and the final projection are initialized at zero. At step zero each block is an identity and the network predicts a zero residual, which is the DiT “zero” initialization. The other linear maps use Xavier uniform initialization. Conditioning therefore has to be learned as a deviation from a pass-through, rather than as a random scramble of the action tokens on the first update.
+$$
+Q = Z W_Q,\quad K = Z W_K,\quad V = Z W_V,
+$$
 
-The 320-dimensional state is not a concatenation of the 7 action numbers with the 256-dimensional scene vector, and it is not the output of the ResNet. The ResNet’s contribution ends at $c$. The 320 channels are the transformer’s working width.
+$$
+\mathrm{head}_i = \mathrm{softmax}\!\left(\frac{Q_i K_i^{\top}}{\sqrt{d_h}}\right) V_i, \qquad \mathrm{MSA}(Z) = \mathrm{Concat}(\mathrm{head}_1,\ldots,\mathrm{head}_n)\, W_O.
+$$
+
+The attention residual is gated by the encoder memory before it is added, and the position-wise feed-forward residual is gated the same way. The feed-forward map is $d \to 4d \to d$, that is $320 \to 1280 \to 320$, with the tanh approximation of GELU:
+
+$$
+\begin{aligned}
+U &= \mathrm{Modulate}\!\left(\mathrm{LN}(Z^{(\ell-1)}); s_{\mathrm{attn}}, b_{\mathrm{attn}}\right), \\
+Z' &= Z^{(\ell-1)} + g_{\mathrm{attn}} \odot \mathrm{MSA}(U), \\
+V &= \mathrm{Modulate}\!\left(\mathrm{LN}(Z'); s_{\mathrm{mlp}}, b_{\mathrm{mlp}}\right), \\
+Z^{(\ell)} &= Z' + g_{\mathrm{mlp}} \odot \mathrm{FFN}(V).
+\end{aligned}
+$$
+
+The readout is one more conditioned layer norm and a linear map back to the action dimension,
+
+$$
+\hat\varepsilon_t = W_{\mathrm{out}}\, \mathrm{Modulate}\!\left(\mathrm{LN}(Z^{(L)}); s_{\mathrm{out}}, b_{\mathrm{out}}\right) \in \mathbb{R}^{H \times 7}.
+$$
+
+So the decoder defines a function $\mathrm{Dec}_\theta(x_t, t, c)$ whose output is a whole sequence, aligned token-for-token with the input chunk. Training regresses that sequence against the noise that produced $x_t$. Nothing in the stack is causal, and nothing in it is cross-attention: the encoder’s only channel into the decoder is $(s, b, g)$ derived from $m_t$.
+
+The gates and the final projection are initialized at zero. At step zero each block is an identity and the network predicts a zero residual, which is the DiT “zero” initialization. The other linear maps use Xavier uniform initialization. The encoder memory therefore has to be learned as a deviation from a pass-through, rather than as a random scramble of the action tokens on the first update. The 320-dimensional state is the decoder width. It is not a concatenation of the 7 action numbers with $c$, and it is not the output of the ResNet. The encoder’s contribution ends at $c$, and from there only $m_t$ remains.
 
 ## Generative model
 
