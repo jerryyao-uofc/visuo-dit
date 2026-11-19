@@ -196,25 +196,29 @@ Optimization uses AdamW at learning rate $10^{-4}$, batch size 64, for $10^5$ gr
 
 A sigmoid schedule is the second variance table, with the construction used in `denoising-diffusion-pytorch`: $\bar\alpha_t$ follows a sigmoid from nearly 1 to nearly 0, parameterized by endpoints $-3$ and $3$ and temperature $\tau = 1$, then converted to $\beta_t$ and clipped at 0.999. Relative to cosine it spends its early indices at a higher noise level. The first-step noise coefficient is about 0.08 rather than 0.04, and the two curves meet near the middle of the chain. A linear schedule is implemented and selectable, and it was not one of the four reported runs.
 
-Because $t$ is drawn uniformly, the stochastic gradient is dominated by the middle of the chain, where cosine and sigmoid nearly agree. The low-$t$ examples, which cosine keeps closer to $x_0$, are a minority of each epoch. They still matter at deployment, because the controller consumes the clean end of the reverse chain, not a mid-chain latent.
+Because $t$ is drawn uniformly, the stochastic gradient is dominated by the middle of the chain, where cosine and sigmoid nearly agree. The examples with a small $t$, which cosine keeps closer to $x_0$, are a minority of each epoch. They still matter at deployment, because the controller consumes the clean end of the reverse chain, not a mid-chain latent.
 
 ## Closed-loop inference
 
-Sampling is ancestral DDPM, conditioned on one observation, for the full 50 steps. There is no classifier-free guidance and no distilled sampler. The procedure is:
+Sampling is ancestral DDPM, conditioned on one observation, for the full 50 steps. There is no classifier-free guidance and no distilled sampler.
 
-1. Normalize the current observation with the dataset statistics and encode it once to $c$. The encoder is not recomputed inside the denoising loop.
-2. Draw $x_T \sim \mathcal{N}(0, I)$ with shape $1 \times 10 \times 7$.
-3. For $t = 49, \ldots, 0$, predict the noise, recover a clean-chunk estimate, and take one posterior step. For an $\varepsilon$-model,
+**Step 1.** Normalize the current observation with the dataset statistics and encode it once to $c$. The encoder is not recomputed inside the denoising loop.
 
-   $$
-   \hat x_0 = \frac{x_t - \sqrt{1-\bar\alpha_t}\,\varepsilon_\theta}{\sqrt{\bar\alpha_t}}.
-   $$
+**Step 2.** Draw $x_T \sim \mathcal{N}(0, I)$ with shape $1 \times 10 \times 7$.
 
-   $\hat x_0$ is clipped to $[-1, 1]$, which is the legal range of the normalized actions. The mean of the reverse transition is the standard Gaussian posterior mean written in terms of $x_t$ and $\hat x_0$. For every $t > 0$ fresh noise is added with the posterior standard deviation; the last step is deterministic.
+**Step 3.** For $t = 49, \ldots, 0$, predict the noise, recover a clean-chunk estimate, and take one posterior step. For an $\varepsilon$-model,
 
-4. Unnormalize the chunk into controller units.
-5. Execute the first 8 commands. Do not re-encode until those 8 steps have been applied, or the episode hits the 500-step cap.
-6. Read both cameras and the 9 proprioceptive scalars, and sample a new chunk.
+$$
+\hat{x}_0 = \frac{x_t - \sqrt{1 - \bar{\alpha}_t}\, \varepsilon_\theta}{\sqrt{\bar{\alpha}_t}}.
+$$
+
+$\hat{x}_0$ is clipped to $[-1, 1]$, which is the legal range of the normalized actions. The mean of the reverse transition is the standard Gaussian posterior mean written in terms of $x_t$ and $\hat{x}_0$. For every $t \gt 0$ fresh noise is added with the posterior standard deviation. The last step is deterministic.
+
+**Step 4.** Unnormalize the chunk into controller units.
+
+**Step 5.** Execute the first 8 commands. Do not re-encode until those 8 steps have been applied, or the episode hits the 500-step cap.
+
+**Step 6.** Read both cameras and the 9 proprioceptive scalars, and sample a new chunk.
 
 The three horizons are easy to conflate, and they measure different things. Fifty is the number of denoising iterations inside a single plan. Ten is the temporal length of that plan. Eight is how much of the plan is trusted before the visual loop closes. All fifty denoising steps happen between two calls to the simulator. They are not fifty motions of the arm.
 
@@ -241,7 +245,7 @@ Four policies were trained on the same demonstrations for $10^5$ updates. They d
 
 ![Success over training](figures/success_vs_steps.png)
 
-**Schedule.** Cosine reaches a usable policy earlier. At 20,000 updates the cosine $\varepsilon$-model succeeds on 11 of 25 episodes, against 4 of 25 for sigmoid and 2 of 25 for behavior cloning. By 30,000 updates the counts are 15 and 5. The mechanism is the low-$t$ end of $\bar\alpha_t$. Cosine leaves those examples nearly clean, so the denoiser’s easiest cases are close to the actions the robot will actually execute. Sigmoid corrupts them more aggressively. Uniform sampling of $t$ hides this in the scalar loss: the two $\varepsilon$-models track each other, and sigmoid finishes lower, 0.026 against 0.035 at step 100,000, both having started at 1.004. The lower loss does not translate into faster task success. At the final retest the two schedules are statistically close, 14 and 15 out of 25. The cosine model’s best logged rate is 18 of 25; its last independent roll is 14 of 25, which is the spread one should expect from 25 randomized episodes.
+**Schedule.** Cosine reaches a usable policy earlier. At 20,000 updates the cosine $\varepsilon$-model succeeds on 11 of 25 episodes, against 4 of 25 for sigmoid and 2 of 25 for behavior cloning. By 30,000 updates the counts are 15 and 5. The mechanism is the end of $\bar\alpha_t$ where $t$ is small. Cosine leaves those examples nearly clean, so the denoiser’s easiest cases are close to the actions the robot will actually execute. Sigmoid corrupts them more aggressively. Uniform sampling of $t$ hides this in the scalar loss: the two $\varepsilon$-models track each other, and sigmoid finishes lower, 0.026 against 0.035 at step 100,000, both having started at 1.004. The lower loss does not translate into faster task success. At the final retest the two schedules are statistically close, 14 and 15 out of 25. The cosine model’s best logged rate is 18 of 25; its last independent roll is 14 of 25, which is the spread one should expect from 25 randomized episodes.
 
 ![Training loss](figures/training_loss.png)
 
